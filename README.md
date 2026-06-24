@@ -3,25 +3,22 @@
 Script Bash automatisé pour installer un serveur LAMP sur Debian.
 
 ## 🎯 Objectif
-Automatiser l’installation d’un environnement web complet :
+Automatiser une stack web complète :
 - Apache2
-- PHP (via dépôt Sury)
+- PHP (Sury)
 - MariaDB
-- phpMyAdmin (optionnel)
-
----
+- phpMyAdmin
 
 ## ⚙️ Fonctionnalités
-- Installation complète LAMP
+- Installation automatique complète
 - PHP version configurable
 - phpMyAdmin optionnel
 - Accès distant MariaDB (option)
-- Configuration Apache automatique
-- Script idempotent (ré-exécutable)
+- Script idempotent
 
----
-
-## 🚀 Utilisation
-
+## 🚀 Installation
 ```bash
+git clone https://github.com/ImNvthan/lamp-debian-installer1.git
+cd lamp-debian-installer1
+chmod +x install-lamp.sh
 sudo ./install-lamp.sh
