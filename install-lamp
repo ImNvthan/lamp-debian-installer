@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+#
+# install-lamp.sh
+# -----------------------------------------------------------------------------
+# Transforme un serveur Debian "nu" en serveur LAMP :
+#   - Apache2
+#   - PHP 8.4 (via le dépôt Sury, + PHP-FPM)
+#   - MariaDB (serveur + client)
+#   - phpMyAdmin (servi sur le port 9090)
+#
+# Basé sur la procédure : https://cours.brosseau.ovh/cheatsheets/serveur/debian-web.html
+#
+# Le script est IDEMPOTENT : vous pouvez le relancer, il ne refait pas
+# inutilement ce qui est déjà en place.
+#
+# Usage :
+#   sudo ./install-lamp.sh                 # installation complète
+#   sudo ./install-lamp.sh --no-phpmyadmin # sans phpMyAdmin
+#   sudo ./install-lamp.sh --remote-db     # autorise l'accès distant à MariaDB (port 3306)
+#   sudo PHP_VERSION=8.3 ./install-lamp.sh # forcer une autre version de PHP
+# -----------------------------------------------------------------------------
+
+set -euo pipefail
+
+# ============================= PARAMÈTRES ====================================
+PHP_VERSION="${PHP_VERSION:-8.4}"
+PMA_VERSION="${PMA_VERSION:-5.2.1}"      # version de phpMyAdmin à télécharger
+PMA_PORT="${PMA_PORT:-9090}"            # port d'écoute pour phpMyAdmin
+INSTALL_PMA=1                            # installer phpMyAdmin (1 = oui)
+REMOTE_DB=0                              # autoriser l'accès distant à MariaDB (1 = oui)
+
+# ============================= COULEURS / LOGS ===============================
+if [[ -t 1 ]]; then
+    C_RESET=$'\e[0m'; C_INFO=$'\e[1;34m'; C_OK=$'\e[1;32m'; C_WARN=$'\e[1;33m'; C_ERR=$'\e[1;31m'
+else
+    C_RESET=""; C_INFO=""; C_OK=""; C_WARN=""; C_ERR=""
+fi
+info()  { echo "${C_INFO}[INFO]${C_RESET} $*"; }
+ok()    { echo "${C_OK}[ OK ]${C_RESET} $*"; }
+warn()  { echo "${C_WARN}[WARN]${C_RESET} $*"; }
+err()   { echo "${C_ERR}[ERR ]${C_RESET} $*" >&2; }
+die()   { err "$*"; exit 1; }
+
+# ============================= ARGUMENTS =====================================
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-phpmyadmin) INSTALL_PMA=0 ;;
+        --remote-db)     REMOTE_DB=1 ;;
+        -h|--help)
+            grep '^#' "$0" | sed 's/^# \?//; 1d'
+            exit 0 ;;
+        *) die "Argument inconnu : $1 (voir --help)" ;;
+    esac
+    shift
+done
+
+# ============================= PRÉ-VÉRIFICATIONS =============================
+[[ $EUID -eq 0 ]] || die "Ce script doit être lancé en root (utilisez sudo)."
+
+if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    [[ "${ID:-}" == "debian" ]] || warn "Distribution détectée : ${ID:-inconnue}. Script prévu pour Debian, on continue quand même."
+else
+    warn "Impossible de détecter la distribution."
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+CODENAME="$(lsb_release -sc 2>/dev/null || echo "${VERSION_CODENAME:-stable}")"
+
+info "Version de PHP cible : ${PHP_VERSION}"
+info "Nom de code Debian   : ${CODENAME}"
+
+# ============================= 1. PAQUETS DE BASE ============================
+info "Mise à jour des dépôts et installation des prérequis..."
+apt-get update -y
+apt-get install -y \
+    wget curl zip unzip gnupg2 ca-certificates \
+    lsb-release apt-transport-https
+ok "Prérequis installés."
+
+# ============================= 2. APACHE ====================================
+info "Installation d'Apache2..."
+apt-get install -y apache2
+ok "Apache installé."
+
+# ============================= 3. DÉPÔT SURY (PHP 8) ========================
+info "Configuration du dépôt Sury pour PHP ${PHP_VERSION}..."
+if [[ ! -f /etc/apt/trusted.gpg.d/php.gpg ]]; then
+    wget -qO /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
+fi
+echo "deb https://packages.sury.org/php/ ${CODENAME} main" > /etc/apt/sources.list.d/php.list
+apt-get update -y
+ok "Dépôt Sury configuré."
+
+# ============================= 4. PHP + EXTENSIONS ==========================
+info "Installation de PHP ${PHP_VERSION} et de ses extensions..."
+apt-get install -y \
+    "php${PHP_VERSION}" \
+    "php${PHP_VERSION}-fpm" \
+    "php${PHP_VERSION}-cli" \
+    "php${PHP_VERSION}-bz2" \
+    "php${PHP_VERSION}-curl" \
+    "php${PHP_VERSION}-mbstring" \
+    "php${PHP_VERSION}-intl" \
+    "php${PHP_VERSION}-pdo" \
+    "php${PHP_VERSION}-mysql" \
+    "php${PHP_VERSION}-gd" \
+    "php${PHP_VERSION}-xml"
+ok "PHP ${PHP_VERSION} installé."
+
+info "Activation de PHP-FPM dans Apache..."
+a2enmod proxy_fcgi setenvif rewrite headers >/dev/null
+a2enconf "php${PHP_VERSION}-fpm" >/dev/null
+systemctl restart apache2
+systemctl enable apache2 >/dev/null
+ok "PHP-FPM activé, Apache redémarré."
+
+php -v | head -n1
+
+# ============================= 5. MARIADB ===================================
+info "Installation de MariaDB..."
+apt-get install -y mariadb-server mariadb-client
+systemctl enable mariadb >/dev/null
+systemctl start mariadb
+ok "MariaDB installé et démarré."
+
+warn "Pensez à exécuter 'mariadb-secure-installation' pour sécuriser le serveur"
+warn "(définir le mot de passe root, supprimer les comptes anonymes et la base de test)."
+
+# ----- Accès distant optionnel (port 3306) ----------------------------------
+if [[ $REMOTE_DB -eq 1 ]]; then
+    info "Activation de l'accès distant à MariaDB (bind-address = 0.0.0.0)..."
+    CNF="/etc/mysql/mariadb.conf.d/50-server.cnf"
+    if grep -qE '^\s*bind-address' "$CNF"; then
+        sed -i 's/^\s*bind-address.*/bind-address = 0.0.0.0/' "$CNF"
+    else
+        sed -i '/^\[mysqld\]/a bind-address = 0.0.0.0' "$CNF"
+    fi
+    systemctl restart mariadb
+    ok "MariaDB écoute désormais sur toutes les interfaces (port 3306)."
+    warn "N'oubliez pas de créer un utilisateur dédié avec des droits restreints."
+fi
+
+# ============================= 6. URL REWRITE ===============================
+info "Activation de la réécriture d'URL (AllowOverride All sur /var/www/html)..."
+a2enmod rewrite >/dev/null
+DEFAULT_VHOST="/etc/apache2/sites-available/000-default.conf"
+if ! grep -q "Directory /var/www/html" "$DEFAULT_VHOST"; then
+    # Insère un bloc <Directory> juste avant la fermeture du VirtualHost
+    sed -i '/<\/VirtualHost>/i \
+\t<Directory /var/www/html>\
+\t\tOptions Indexes FollowSymLinks\
+\t\tAllowOverride All\
+\t\tRequire all granted\
+\t</Directory>' "$DEFAULT_VHOST"
+    ok "Bloc <Directory> ajouté au vhost par défaut."
+else
+    ok "Bloc <Directory> déjà présent."
+fi
+systemctl reload apache2
+
+# ============================= 7. PHPMYADMIN ================================
+if [[ $INSTALL_PMA -eq 1 ]]; then
+    info "Installation de phpMyAdmin ${PMA_VERSION} (port ${PMA_PORT})..."
+    PMA_DIR="/var/www/html/phpmyadmin"
+    if [[ ! -d "$PMA_DIR" ]]; then
+        TMP_ZIP="/tmp/phpMyAdmin-${PMA_VERSION}-all-languages.zip"
+        wget -qO "$TMP_ZIP" \
+            "https://files.phpmyadmin.net/phpMyAdmin/${PMA_VERSION}/phpMyAdmin-${PMA_VERSION}-all-languages.zip"
+        unzip -q "$TMP_ZIP" -d /var/www/html
+        mv "/var/www/html/phpMyAdmin-${PMA_VERSION}-all-languages" "$PMA_DIR"
+        rm -f "$TMP_ZIP"
+        chown -R www-data:www-data "$PMA_DIR"
+        ok "phpMyAdmin déployé dans ${PMA_DIR}."
+    else
+        ok "phpMyAdmin déjà présent dans ${PMA_DIR}."
+    fi
+
+    # Apache doit écouter sur le port dédié
+    if ! grep -qE "^\s*Listen\s+${PMA_PORT}\b" /etc/apache2/ports.conf; then
+        echo "Listen ${PMA_PORT}" >> /etc/apache2/ports.conf
+        ok "Apache écoute désormais sur le port ${PMA_PORT}."
+    fi
+
+    # Virtual host dédié
+    cat > /etc/apache2/sites-available/phpmyadmin.conf <<EOF
+<VirtualHost *:${PMA_PORT}>
+    ServerAdmin webmaster@localhost
+    DocumentRoot /var/www/html/phpmyadmin
+
+    <Directory /var/www/html/phpmyadmin>
+        Options Indexes FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog \${APACHE_LOG_DIR}/phpmyadmin_error.log
+    CustomLog \${APACHE_LOG_DIR}/phpmyadmin_access.log combined
+</VirtualHost>
+EOF
+    a2ensite phpmyadmin >/dev/null
+    systemctl restart apache2
+    ok "phpMyAdmin accessible sur le port ${PMA_PORT}."
+else
+    info "Installation de phpMyAdmin ignorée (--no-phpmyadmin)."
+fi
+
+# ============================= 8. PAGE DE TEST ==============================
+if [[ ! -f /var/www/html/info.php ]]; then
+    echo "<?php phpinfo();" > /var/www/html/info.php
+    info "Page de test créée : http://<IP_DU_SERVEUR>/info.php"
+    warn "Supprimez /var/www/html/info.php une fois vos vérifications terminées (info sensible)."
+fi
+
+# ============================= 9. VÉRIFICATIONS =============================
+echo
+info "Vérification finale du serveur Web..."
+if curl -s --head http://localhost:80 | grep -q "HTTP/1.[01] [23].."; then
+    ok "Apache écoute bien sur le port 80."
+else
+    warn "Apache ne semble pas répondre sur le port 80."
+fi
+
+IP_LOCAL="$(hostname -I 2>/dev/null | awk '{print $1}')"
+echo
+ok "================ Installation LAMP terminée ================"
+echo "  Apache     : http://${IP_LOCAL:-localhost}/"
+echo "  PHP        : $(php -v | head -n1)"
+echo "  MariaDB    : $(mariadb --version 2>/dev/null | awk '{print $5}' | tr -d ',')"
+[[ $INSTALL_PMA -eq 1 ]] && echo "  phpMyAdmin : http://${IP_LOCAL:-localhost}:${PMA_PORT}/"
+echo
+echo "  À faire ensuite :"
+echo "    1. mariadb-secure-installation   (sécuriser la base)"
+echo "    2. rm /var/www/html/info.php     (après vérification)"
+echo "==========================================================="
