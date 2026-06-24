@@ -22,3 +22,13 @@ git clone https://github.com/ImNvthan/lamp-debian-installer1.git
 cd lamp-debian-installer1
 chmod +x install-lamp.sh
 sudo ./install-lamp.sh
+
+## 🧪 Options
+```bash
+--no-phpmyadmin
+--remote-db
+PHP_VERSION=8.3 ./install-lamp.sh
+
+## 🔐 Sécurité
+sudo mariadb-secure-installation
+sudo rm /var/www/html/info.php
