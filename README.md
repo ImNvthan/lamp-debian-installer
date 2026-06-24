@@ -25,6 +25,14 @@ Ce projet a été réalisé dans une logique d’administration système :
 
 ---
 
+## 🛠️ Méthodologie
+
+Ce projet a été construit à partir d’une documentation technique décrivant l’installation manuelle d’un serveur LAMP sur Debian.
+
+Cette procédure a ensuite été automatisée en script Bash, testée et adaptée sur environnement Debian (VM).
+
+---
+
 ## ⚙️ Stack installée
 
 - Apache2
